@@ -2,11 +2,13 @@
 
 ## La historia (por qué existe este repo)
 
-La verdad: **no me había dado cuenta de que este concurso existía**. Cuando caí en
-cuenta, quedaban ~6 semanas para el cierre, con reglas que no conocía, un leaderboard
-ya en marcha y mi calendario lleno entre clases y la sección semanal de Probability
-for AI. Ponerme al día a mano (leer el README oficial, investigar métodos, armar un
-plan, calendarizarlo) me hubiera costado días que no tenía.
+Historia real: este concurso es parte de un curso en el que estoy, y **me perdí
+completamente la noticia de que había arrancado**. Cuando por fin me enteré, ya
+habían pasado **7 días desde el inicio** y yo ni enterado: reglas que no conocía,
+leaderboard en marcha, gente ya subiendo submissions y mi calendario lleno entre
+clases y la sección semanal de Probability for AI. Ponerme al día a mano (leer el
+README oficial, investigar métodos, armar un plan, calendarizarlo) me hubiera
+costado días que no tenía.
 
 Así que usé **[Fluso](https://fluso.ai)** (mi asistente de IA con conectores a mis
 herramientas) para organizar todo el proyecto en una sola tarde:
