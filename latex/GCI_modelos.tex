@@ -1,0 +1,254 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[spanish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=2.4cm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=black, urlcolor=blue!50!black}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small GCI Credit Default Risk 2026}
+\fancyhead[R]{\small Modelos del proyecto}
+\fancyfoot[C]{\thepage}
+\setlength{\parskip}{4pt}
+
+\title{\textbf{Modelos del proyecto}\\[4pt]
+\large GCI Global 2026 --- Home Credit Default Risk (subset de una tabla)}
+\author{Mario Alejandro Marroqu\'in Mel\'endez}
+\date{Octubre 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent Documento t\'ecnico de referencia sobre los modelos a utilizar en la
+competencia GCI Global 2026 (Home Credit Default Risk, versi\'on de una sola
+tabla). Se describe el baseline vigente, los modelos candidatos del ensemble,
+la arquitectura de combinaci\'on y el protocolo de validaci\'on y selecci\'on.
+La m\'etrica oficial es ROC-AUC; cierra el 20 de noviembre de 2026 (01:00 UTC)
+y \textbf{solo cuenta la \'ultima submission} para el ranking final.
+\end{abstract}
+
+\tableofcontents
+
+\section{Contexto y datos}
+La competencia usa un \'unico archivo a nivel solicitud (\texttt{train.csv},
+171{,}202 $\times$ 34; \texttt{test.csv}, 61{,}500 $\times$ 33), sin las tablas
+auxiliares del Kaggle original. El objetivo \texttt{TARGET} est\'a desbalanceado:
+8.1\% positivos. Hallazgos relevantes del EDA inicial:
+\begin{itemize}
+  \item \texttt{EXT\_SOURCE\_1/2/3} concentran la se\~nal (correlaci\'on de
+        $-0.154$ a $-0.178$ con \texttt{TARGET}); sus valores faltantes predicen
+        (default 8.9\% con \texttt{EXT\_SOURCE\_3} ausente vs.\ 7.7\% presente)
+        $\Rightarrow$ no imputar; conservar NaN y agregar flags \texttt{*\_ISNA}.
+  \item \texttt{DAYS\_EMPLOYED = 365243} es un c\'odigo especial presente en el
+        18.0\% de las filas $\Rightarrow$ flag binario y conversi\'on a NaN.
+  \item \texttt{ORGANIZATION\_TYPE} y \texttt{OCCUPATION\_TYPE} tienen alta
+        cardinalidad $\Rightarrow$ target encoding \emph{out-of-fold} con
+        smoothing (nunca global, por riesgo de leakage).
+\end{itemize}
+
+\section{Modelos}
+
+\subsection{LightGBM --- modelo base (en producci\'on)}
+Baseline actual del repositorio (commit del 2026-10-08): validaci\'on cruzada
+estratificada de 5 folds, \textbf{CV AUC = 0.7581}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Hiperpar\'ametro} & \textbf{Valor} \\
+\midrule
+\texttt{learning\_rate} & 0.03 \\
+\texttt{num\_leaves} & 31 \\
+\texttt{min\_child\_samples} & 50 \\
+\texttt{feature\_fraction} & 0.8 \\
+\texttt{bagging\_fraction} / \texttt{bagging\_freq} & 0.8 / 1 \\
+\texttt{lambda\_l2} & 1.0 \\
+Early stopping & 200 rondas \\
+Semillas & fijas en \texttt{src/config.py} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{Rol:} baseline de referencia y candidato a ganador individual.
+Ventajas: r\'apido en CPU, maneja NaN de forma nativa (clave para
+\texttt{EXT\_SOURCE}), ideal para iterar feature engineering.
+
+\subsection{XGBoost --- diversificador 1}
+Mismo conjunto de features que LightGBM, pero con esquema de regularizaci\'on
+distinto, lo que produce errores descorrelacionados --- condici\'on necesaria
+para que el blend supere a los individuales. \textbf{Rol:} segundo pilar del
+ensemble. Branch: \texttt{model/xgboost}.
+
+\subsection{CatBoost --- diversificador 2}
+Maneja variables categ\'oricas de forma nativa mediante \emph{ordered target
+statistics} (anti-leakage incorporado), complementario al target encoding OOF
+manual. Fuerte en datos tabulares sin ajuste fino. \textbf{Rol:} tercer pilar;
+captura la informaci\'on de las categ\'oricas crudas. Branch:
+\texttt{model/catboost}.
+
+\subsection{TabPFN --- experimental (M4)}
+\emph{Foundation model} tabular (Nature, 2025): aprende de manera
+cualitativamente distinta a los \'arboles, lo que aporta diversidad real al
+ensemble. Se eval\'ua en el Sprint 4; \textbf{solo se adopta si corre en CPU y
+suma $\geq 0.002$ de AUC (RSKF) al blend}.
+
+\section{Arquitectura del ensemble}
+\begin{enumerate}
+  \item \textbf{Nivel 0:} cada modelo se entrena con StratifiedKFold de 5 folds
+        y produce predicciones \emph{out-of-fold} (OOF) sobre train y
+        predicciones promediadas sobre test.
+  \item \textbf{Nivel 1 --- blend ponderado:} combinaci\'on lineal de las OOF;
+        los pesos se optimizan sobre las OOF (rejilla $0$--$1$, paso $0.1$).
+  \item \textbf{Nivel 2 --- stacking (Sprint 4):} regresi\'on log\'istica sobre
+        las OOF como meta-features.
+  \item \textbf{Salida:} probabilidad final por fila $\rightarrow$ CSV
+        \texttt{SK\_ID\_CURR,TARGET} en el formato exacto de
+        \texttt{sample\_submission.csv}.
+\end{enumerate}
+Regla de adopci\'on: el blend/stacking solo reemplaza al mejor modelo individual
+si lo supera en CV --- la complejidad adicional tambi\'en cuesta
+reproducibilidad.
+
+\section{Validaci\'on y selecci\'on}
+\begin{itemize}
+  \item \textbf{Desarrollo diario:} StratifiedKFold 5-fold con semilla fija;
+        m\'etrica de control: AUC sobre OOF.
+  \item \textbf{Selecci\'on del modelo final:} Repeated StratifiedKFold $3
+        \times 5$ (semillas 42/43/44), decisi\'on por media $\pm$ desviaci\'on.
+        \textbf{Nunca} por el public leaderboard (es un subconjunto del test y
+        lleva a sobreajuste).
+  \item \textbf{Se\~nal de alarma:} si $|\text{CV} - \text{LB}| > 0.02$, se
+        detiene la iteraci\'on y se corrige primero la validaci\'on (domain
+        shift o leakage). Complemento en M4: \emph{adversarial validation}
+        train-vs-test, AUC $< 0.6$ = aceptable.
+  \item \textbf{Umbrales de adopci\'on a \texttt{main}:} $+0.003$ features,
+        $+0.002$ tuning, $+0.001$ blend/stacking. Un branch por experimento;
+        \texttt{main} = mejor verificado; todo modelo guarda OOF, par\'ametros
+        y semilla.
+\end{itemize}
+
+\section{Matem\'aticas del proyecto (para auditor\'ia)}
+
+Esta secci\'on fija la formulaci\'on exacta de cada componente, de modo que
+cualquier revisor pueda auditar el pipeline sin ambig\"uedades. Notaci\'on:
+$N$ filas de train, $y_i \in \{0,1\}$, $x_i \in \mathbb{R}^d$, predicci\'on
+$\hat{p}_i = P(y_i=1 \mid x_i)$.
+
+\subsection{M\'etrica oficial: ROC-AUC}
+\begin{equation}
+\mathrm{AUC} = P\big(\hat{p}_i > \hat{p}_j \mid y_i=1,\ y_j=0\big)
+= \frac{1}{N_1 N_0} \sum_{i:\,y_i=1}\ \sum_{j:\,y_j=0}
+\Big[ \mathbb{1}(\hat{p}_i > \hat{p}_j) + \tfrac{1}{2}\,\mathbb{1}(\hat{p}_i = \hat{p}_j) \Big]
+\end{equation}
+Es insensible al umbral y a la escala monot\'onica de $\hat{p}$; por eso el
+desbalance 8.1\% no obliga a remuestrear.
+
+\subsection{Gradient boosting (formulaci\'on com\'un)}
+Los tres modelos base son m\'aquinas de boosting aditivo sobre \'arboles:
+\begin{equation}
+\hat{p}_i = \sigma\!\left( \eta_i \right), \qquad
+\eta_i^{(T)} = \eta_i^{(0)} + \sum_{t=1}^{T} \nu\, f_t(x_i), \qquad
+\sigma(z) = \frac{1}{1+e^{-z}}
+\end{equation}
+con tasa de aprendizaje $\nu = 0.03$. En la iteraci\'on $t$, $f_t$ se ajusta
+minimizando la p\'erdida log\'istica:
+\begin{equation}
+\mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N}
+\Big[ y_i \log \hat{p}_i + (1-y_i)\log(1-\hat{p}_i) \Big].
+\end{equation}
+
+\subsection{XGBoost: objetivo de segundo orden}
+Aproximaci\'on de Taylor de orden 2 del objetivo regularizado:
+\begin{equation}
+\mathcal{L}^{(t)} \simeq \sum_{i=1}^{N}\Big[ g_i f_t(x_i) + \tfrac{1}{2} h_i f_t^2(x_i) \Big]
++ \gamma T_{\text{hojas}} + \tfrac{1}{2}\lambda \sum_{j} w_j^2,
+\quad g_i = \hat{p}_i - y_i,\quad h_i = \hat{p}_i(1-\hat{p}_i)
+\end{equation}
+y el peso \'optimo de la hoja $j$ y la ganancia de un split:
+\begin{equation}
+w_j^* = -\frac{G_j}{H_j + \lambda}, \qquad
+\mathrm{Gain} = \frac{1}{2}\left[ \frac{G_L^2}{H_L+\lambda} + \frac{G_R^2}{H_R+\lambda}
+- \frac{(G_L+G_R)^2}{H_L+H_R+\lambda} \right] - \gamma .
+\end{equation}
+
+\subsection{LightGBM: histogramas y GOSS/EFB}
+Mismo objetivo, pero discretiza las features en histogramas de $b$ bins
+(reduce coste de split de $O(N)$ a $O(b)$ por feature) y crece hojas
+\emph{leaf-wise} con l\'imites \texttt{num\_leaves}$=31$ y
+\texttt{min\_child\_samples}$=50$. La regularizaci\'on expl\'icita del
+baseline es $\texttt{lambda\_l2} = 1.0$ sobre los pesos de hoja, m\'as
+submuestreo estoc\'astico: \texttt{feature\_fraction}$=0.8$ por \'arbol y
+\texttt{bagging\_fraction}$=0.8$ por iteraci\'on.
+
+\subsection{CatBoost: target statistics ordenadas}
+Para la categ\'orica $k$ de la fila $i$, el encoding se calcula solo con filas
+\emph{anteriores} en una permutaci\'on aleatoria (anti-leakage):
+\begin{equation}
+\mathrm{TS}(x_i^{k}) = \frac{\sum_{j \prec i} \mathbb{1}(x_j^{k} = x_i^{k})\, y_j + a\, \bar{y}}
+{\sum_{j \prec i} \mathbb{1}(x_j^{k} = x_i^{k}) + a}
+\end{equation}
+con prior global $\bar{y}$ y smoothing $a$. Su an\'alogo manual en el proyecto
+(target encoding OOF con smoothing) usa la media de los otros folds como
+denominador de evidencia.
+
+\subsection{Target encoding OOF con smoothing (features manuales)}
+Para \texttt{ORGANIZATION\_TYPE} / \texttt{OCCUPATION\_TYPE}, fold $k$ excluido:
+\begin{equation}
+\mathrm{TE}(c) = \frac{n_c\, \bar{y}_c + m\, \bar{y}}{n_c + m}
+\end{equation}
+donde $\bar{y}_c$ y $n_c$ son media y conteo de la categor\'ia $c$ \textbf{en
+los folds de entrenamiento}, y $m$ controla el encogimiento al prior. La fila
+nunca contribuye a su propio encoding (sin leakage).
+
+\subsection{Validaci\'on cruzada: estimador CV y RSKF}
+StratifiedKFold preserva la proporci\'on de positivos en cada fold
+($\pi_k \approx 0.081$). El estimador de control diario:
+\begin{equation}
+\widehat{\mathrm{AUC}}_{\mathrm{OOF}} = \mathrm{AUC}\big(\{(y_i, \hat{p}_i^{\,\mathrm{OOF}})\}_{i=1}^{N}\big)
+\end{equation}
+Para la decisi\'on final, Repeated StratifiedKFold $3 \times 5$ (semillas
+42/43/44) da $R=15$ estimaciones y la decisi\'on usa
+\begin{equation}
+\bar{A} = \frac{1}{R}\sum_{r=1}^{R} A_r, \qquad
+s_A = \sqrt{\frac{1}{R-1}\sum_{r=1}^{R} (A_r - \bar{A})^2} .
+\end{equation}
+El candidato gana solo si $\bar{A}_{\text{cand}} > \bar{A}_{\text{ref}} + \delta$
+con $\delta \in \{0.003\ \text{features},\ 0.002\ \text{tuning},\ 0.001\
+\text{ensemble}\}$.
+
+\subsection{Blend ponderado (nivel 1)}
+Con predicciones OOF de $M$ modelos, el blend resuelve:
+\begin{equation}
+w^* = \arg\max_{w \in \Delta} \mathrm{AUC}\!\left( \left\{ y_i,\ \textstyle\sum_{m=1}^{M} w_m\, \hat{p}_{i,m}^{\mathrm{OOF}} \right\} \right),
+\quad \Delta = \{ w_m \ge 0,\ \textstyle\sum_m w_m = 1 \}
+\end{equation}
+explorado en rejilla con paso $0.1$. Como AUC es invariante monot\'onico, no se
+impone calibraci\'on previa.
+
+\subsection{Stacking (nivel 2, Sprint 4)}
+Meta-modelo log\'istico sobre las OOF apiladas:
+\begin{equation}
+\hat{p}_i^{\text{stack}} = \sigma\!\left( \beta_0 + \sum_{m=1}^{M} \beta_m\, \mathrm{logit}\, \hat{p}_{i,m}^{\mathrm{OOF}} \right),
+\qquad \beta^* = \arg\min_\beta \sum_i \ell\big(y_i, \hat{p}_i^{\text{stack}}\big) + \lambda_\beta \|\beta\|_2^2
+\end{equation}
+entrenado con la misma validaci\'on anidada para no inflar el estimador.
+
+\section{Metas}
+\begin{itemize}
+  \item \textbf{M3 (6 nov) --- red de seguridad:} pipeline end-to-end
+        reproducible (\texttt{python -m src.train}) con CV $\geq 0.7681$
+        (baseline $+0.01$), \texttt{refs.md} completo.
+  \item \textbf{M5 (18 nov):} submission final elegida por RSKF, dos d\'ias de
+        colch\'on antes del cierre oficial.
+\end{itemize}
+
+\end{document}
